@@ -36,6 +36,9 @@ class Appointment:
         status_code = getattr(response, 'status_code', None)
         if status_code == 200:
             pass # 成功的请求无需记录
+        elif status_code == 429:
+            retry_after = response.headers.get("Retry-After", "N/A")
+            logging.warning(f"请求触发限流(429 Too Many Requests): {url}, Retry-After: {retry_after}")
         elif status_code == 504:
             logging.warning(f"请求遭遇网关超时(504 Gateway Timeout): {url}")
         else:
@@ -72,4 +75,3 @@ class Appointment:
             logging.error(f"POST请求网络异常: {url}, 错误: {e}")
 
         return None
-
