@@ -13,7 +13,7 @@ import random
 from bs4 import BeautifulSoup
 from email.utils import parsedate_to_datetime
 
-SCRIPT_TOKEN_RE = re.compile(
+TOKEN_RE = re.compile(
     r'<input[^>]*name\s*=\s*\\?["\']token\\?["\'][^>]*value\s*=\s*\\?["\']([^"\'\\]+)\\?["\']',
     re.IGNORECASE
 )
@@ -22,6 +22,7 @@ SCRIPT_TOKEN_RE = re.compile(
 class BookingManager:
     LOGIN_TIME = "07:55:00"
     BOOKING_TIME = "07:59:58"
+    BOOKING_DEADLINE_TIME = "08:06:00"
     WAIT_END_TIME = "18:00:00"
     ACCESS_GYM_MAX_RETRIES = 30
     GUIDE_TOKEN_MAX_RETRIES = 20
@@ -60,73 +61,89 @@ class BookingManager:
         try:
             self._wait_for_login_time()
             self._login()
-            
-            self.now_day = datetime.now().date()
-            self.mid_day = (self.now_day + timedelta(days=1)).strftime('%Y-%m-%d')
-            self.book_day = (self.now_day + timedelta(days=2)).strftime('%Y-%m-%d')
-            logging.info(f"目标预约日期: {self.book_day}")
 
-            csrf_token = self._fetch_token_from_booking_guide()
-            if not csrf_token:
-                logging.error("BOOKING_TIME 前未能从预约须知页提取 token，终止预约流程")
+            self._init_booking_dates()
+
+            token = self._get_token()   # 在预约开始前获取初始 token，失败则直接放弃预约流程
+            if not token:
                 return None
 
             self._wait_for_booking_time()
 
-            booking_deadline = datetime.now().replace(hour=8, minute=6, second=0, microsecond=0)
-            # logging.info(f"抢票主循环启动，将持续尝试直到 {booking_deadline.strftime('%H:%M:%S')}")
-
-            gym_page_response = None
-            
-            while datetime.now() < booking_deadline or self.debug:
-                if not gym_page_response:
-                    gym_page_response = self._access_gym_page()
-                    if not gym_page_response:
-                        logging.warning("访问场馆页面失败或未开放，间歇重试...")
-                        sleep_time = self._pre_open_probe_delay() if self._is_before_gym_open() else random.uniform(0.8, 1.6)
-                        time.sleep(sleep_time)
-                        continue
-
-                available_site, booking_token = self._find_available_slot(csrf_token)
-                if booking_token:
-                    csrf_token = booking_token
-                active_booking_token = booking_token or csrf_token
-                
-                if available_site == 0 or available_site == None:
-                    logging.info("无可用场地或请求失败，间歇重试。")
-                    time.sleep(random.uniform(0.3, 1.0)) # 避免过于频繁的请求
-                    continue
-
-                logging.info(f"成功找到可用场地: {available_site}")
-
-                captcha_token, reserve_id, order_id = self._process_step2(
-                    available_site=available_site,
-                    csrf_token=csrf_token,
-                    booking_token=active_booking_token
-                )
-                if not captcha_token:
-                    logging.warning("处理Step2或验证码失败，立即重试...")
-                    continue
-                
-                final_url = self._process_step3(
-                    captcha_token=captcha_token,
-                    csrf_token=csrf_token,
-                    booking_token=active_booking_token,
-                    reserve_id=reserve_id,
-                    order_id=order_id
-                )
-                if final_url:
-                    logging.info("--- 预约流程成功完成 ---")
-                    return final_url
-                else:
-                    logging.warning("最终提交(Step3)失败，立即重试...")
-            
-            logging.error("预约失败")
-            return None
+            return self._run_booking_loop(token)
 
         except Exception as e:
             logging.error(f"执行预约时发生意外错误: {e}", exc_info=True)
             return None
+
+    def _init_booking_dates(self):
+        self.now_day = datetime.now().date()
+        self.mid_day = (self.now_day + timedelta(days=1)).strftime('%Y-%m-%d')
+        self.book_day = (self.now_day + timedelta(days=2)).strftime('%Y-%m-%d')
+        logging.info(f"目标预约日期: {self.book_day}")
+
+    def _get_token(self) -> Optional[str]:
+        token = self._fetch_token_from_booking_guide()
+        if token:
+            return token
+
+        logging.error("BOOKING_TIME 前未能从预约须知页提取 token，终止预约流程")
+        return None
+
+    def _run_booking_loop(self, token: str) -> Optional[str]:
+        booking_deadline = self._booking_deadline()
+        gym_page_response = None
+        # current_token = token
+
+        while datetime.now() < booking_deadline or self.debug:
+            if not gym_page_response:
+                gym_page_response = self._access_gym_page()
+                if not gym_page_response:
+                    logging.warning("访问场馆页面失败或未开放，间歇重试...")
+                    sleep_time = self._pre_open_probe_delay() if self._is_before_gym_open() else random.uniform(0.8, 1.6)
+                    time.sleep(sleep_time)
+                    continue
+
+            # available_site, booking_token = self._find_available_slot(token)
+            available_site = self._find_available_slot(token)
+
+            if available_site in (0, None):
+                logging.info("无可用场地或请求失败，间歇重试。")
+                time.sleep(random.uniform(0.3, 1.0))  # 避免过于频繁的请求
+                continue
+
+            logging.info(f"成功找到可用场地: {available_site}")
+            captcha_token, reserve_id, order_id = self._process_step2(
+                available_site=available_site,
+                token=token
+            )
+            if not captcha_token:
+                logging.warning("处理Step2或验证码失败，立即重试...")
+                continue
+
+            final_url = self._process_step3(
+                captcha_token=captcha_token,
+                token=token,
+                reserve_id=reserve_id,
+                order_id=order_id
+            )
+            if final_url:
+                logging.info("--- 预约流程成功完成 ---")
+                return final_url
+
+            logging.warning("最终提交(Step3)失败，立即重试...")
+
+        logging.error("预约失败")
+        return None
+
+    def _booking_deadline(self) -> datetime:
+        deadline_time = datetime.strptime(self.BOOKING_DEADLINE_TIME, "%H:%M:%S").time()
+        return datetime.now().replace(
+            hour=deadline_time.hour,
+            minute=deadline_time.minute,
+            second=deadline_time.second,
+            microsecond=0,
+        )
 
     def _wait_for_login_time(self):
         self._wait_until_time(self.LOGIN_TIME)
@@ -152,7 +169,8 @@ class BookingManager:
             # 计算距离目标时间的秒数
             time_diff = (datetime.combine(datetime.today(), target) - datetime.combine(datetime.today(), now)).total_seconds()
             
-            # 智能睡眠策略：根据距离目标时间的远近动态调整
+            # 等待本质上是“少唤醒 + 到点别迟到”，不是做高精度计时器。
+            # 所以前面睡粗一点，最后10秒再细化轮询。
             if time_diff > 300:  # 距离目标时间超过5分钟
                 sleep_time = random.uniform(25, 35)  # 睡眠25-35秒
             elif time_diff > 60:  # 距离目标时间超过1分钟
@@ -232,6 +250,9 @@ class BookingManager:
         self.appointment.login()
         logging.info("登录成功")
 
+    def _gym_status_referer(self) -> str:
+        return f'https://pecg.hust.edu.cn/cggl/front/syqk?date={self.mid_day}&type=1&cdbh={self.gym_id}'
+
     def _fetch_token_from_booking_guide(self) -> Optional[str]:
         """
         在 BOOKING_TIME 前，从预约须知页提取初始 token。
@@ -239,12 +260,16 @@ class BookingManager:
         booking_time = datetime.strptime(self.BOOKING_TIME, "%H:%M:%S").time()
 
         for attempt in range(self.GUIDE_TOKEN_MAX_RETRIES):
+            # 过了 BOOKING_TIME 再来这里拿初始 token 已经没有意义，直接交给主流程。
             if datetime.now().time() >= booking_time:
                 break
 
-            response = self.appointment.get(self.BOOKING_GUIDE_URL, referer=self.BOOKING_GUIDE_URL)
+            response = self.appointment.get(
+                self.BOOKING_GUIDE_URL,
+                referer=self.BOOKING_GUIDE_URL
+            )
             if self._is_response_ok(response):
-                token = self._extract_tokens(response.text)
+                token = self._extract_token(response.text)
                 if token:
                     logging.info(f"成功从预约须知页提取 token (尝试 {attempt + 1} 次)")
                     return token
@@ -280,6 +305,7 @@ class BookingManager:
                     logging.info(f"成功访问场馆页面 (尝试 {attempt + 1} 次)")
                     return response
 
+                # 200 但 URL 被回退，说明入口还没放开；这时继续猛打只会更快撞限流。
                 fallback_sleep = self._pre_open_probe_delay() if self._is_before_gym_open() else random.uniform(0.25, 0.6)
                 logging.info(
                     f"场馆可能尚未开放，页面回退到: {response.url}，继续重试... "
@@ -302,6 +328,7 @@ class BookingManager:
                 exp_backoff = min(1.2 * (2 ** min(consecutive_429, 5)), 12.0)
                 cooldown = max(retry_after, exp_backoff) + random.uniform(0.2, 0.7)
                 if self._is_before_gym_open():
+                    # 开放前抢不到任何资源，优先恢复“可访问资格”，别把自己封死在429里。
                     cooldown = max(cooldown, self._pre_open_probe_delay() + random.uniform(1.0, 2.5))
                 logging.warning(
                     f"访问场馆页面触发429限流，冷却 {cooldown:.2f}s 后重试 "
@@ -323,25 +350,24 @@ class BookingManager:
         return None
 
     @staticmethod
-    def _extract_tokens(page_text: str) -> Optional[str]:
+    def _extract_token(page_text: str) -> Optional[str]:
         """
-        提取页面中的 token（匹配 name=\"token\" value=\"...\"）。
-        returns: token(str) or None
+        提取页面中的 token（匹配 name="token"）。
         """
-        match_script_token = SCRIPT_TOKEN_RE.search(page_text)
-        if match_script_token:
-            token = match_script_token.group(1)
-            logging.info(f"成功提取页面token(脚本): {token}")
-            return token
+        match = TOKEN_RE.search(page_text)
+        if not match:
+            return None
 
-        return None
+        token = match.group(1)
+        logging.info(f"成功提取 token: {token}")
+        return token
 
-    def _find_available_slot(self, booking_token: str) -> Tuple[Optional[int], Optional[str]]:
+    def _find_available_slot(self, token: str) -> int | None:
         """
         查找可预约场地编号
         returns:
-            - 场地编号(int) 和  booking_token(str) : 找到可预约场地
-            - 0 和  booking_token(str) : 无可预约场地
+            - 场地编号(int) 和 token(str) : 找到可预约场地
+            - 0 和 token(str) : 无可预约场地
             - None, None 如果请求失败或遭遇504错误
         """
         url = self.FIND_SLOT_URL
@@ -350,13 +376,13 @@ class BookingManager:
             "data": self.gym_slot.get_reserve_time(),
             "date": self.book_day,
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "token": booking_token
+            "token": token
         }
 
         for attempt in range(self.FIND_SLOT_MAX_RETRIES):
             response = self.appointment.post(url,
                                              data=data,
-                                             referer=f'https://pecg.hust.edu.cn/cggl/front/syqk?date={self.mid_day}&type=1&cdbh={self.gym_id}',
+                                             referer=self._gym_status_referer(),
                                              x_requested_with='XMLHttpRequest')
             
             # 成功路径：仅在请求成功时进入
@@ -369,7 +395,7 @@ class BookingManager:
                 try:
                     # 确保数据结构符合预期
                     msgs = response_data[0].get('message', [])
-                    new_booking_token = response_data[0].get('token')
+                    # new_booking_token = response_data[0].get('token')
 
                     # 查找可用场地
                     choosetime = next((m.get('pian') for m in msgs if m.get('zt') == 1), 0)
@@ -379,7 +405,8 @@ class BookingManager:
                     else:
                         logging.info(f"成功找到可用场地: {choosetime}")
 
-                    return choosetime, new_booking_token
+                    # return choosetime, new_booking_token
+                    return choosetime
 
                 except (IndexError, KeyError, AttributeError, TypeError) as e:
                     # 成功返回200，但响应内容不是预期的JSON格式
@@ -396,11 +423,12 @@ class BookingManager:
 
         # 如果循环正常结束，说明所有尝试都失败了
         logging.error(f"查找可用场地在{self.FIND_SLOT_MAX_RETRIES}次重试后仍然失败。")
-        return None, None
+        # return None None
+        return None
 
-    def _process_step2(self, available_site: int, csrf_token: str, booking_token: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        if  not booking_token:
-            logging.error("Step2参数无效: csrf_token或booking_token为空")
+    def _process_step2(self, available_site: int, token: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        if not token:
+            logging.error("Step2参数无效: token为空")
             return None, None, None
 
         payloads = {
@@ -410,13 +438,13 @@ class BookingManager:
             'choosetime': available_site,
             'changdibh': self.gym_id,
             'date': self.book_day,
-            'token': booking_token,
+            'token': token,
         }
 
         response = None
         for attempt in range(self.STEP2_MAX_RETRIES):
             response = self.appointment.post(url=self.STEP2_URL,
-                                referer=f"https://pecg.hust.edu.cn/cggl/front/syqk?date={self.mid_day}&type=1&cdbh={self.gym_id}",
+                                referer=self._gym_status_referer(),
                                 content_type="application/x-www-form-urlencoded",
                                 origin="https://pecg.hust.edu.cn",
                                 data=payloads)
@@ -431,6 +459,7 @@ class BookingManager:
         logging.info("锁定场地成功")
 
         reserve_id = order_id = ''
+        # 解析Step2响应的跳转URL，提取 reserveId 和 orderId
         try:
             qs = parse_qs(urlparse(response.url).query)
             reserve_id = (qs.get('reserveId') or [''])[0]
@@ -461,11 +490,7 @@ class BookingManager:
 
         return captcha_token, reserve_id, order_id
 
-    def _process_step3(self, captcha_token, csrf_token, booking_token, reserve_id, order_id) -> Optional[str]:
-        # if not all([captcha_token, csrf_token, booking_token, reserve_id, order_id]):
-        #     logging.error("Step3参数无效，存在空值")
-        #     return None
-
+    def _process_step3(self, captcha_token, token, reserve_id, order_id) -> Optional[str]:
         data_step3 = {
             'orderId': order_id,
             'reserveId': reserve_id,
@@ -473,8 +498,8 @@ class BookingManager:
             'id': '',
             'select_pay_type': self.pay_method,
             'captchatoken': captcha_token,
-            'cg_csrf_token': csrf_token,
-            'token': booking_token
+            # 'cg_csrf_token': csrf_token,
+            'token': token
         }
         step3_response = None
         for attempt in range(self.STEP3_MAX_RETRIES):
@@ -495,7 +520,6 @@ class BookingManager:
             return None
 
         if step3_response.status_code == 302:
-            # 从 Location header 获取支付链接
             pay_url = step3_response.headers.get('Location', '')
             logging.info(f"预约成功，支付链接: {pay_url}")
             return pay_url
