@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime, timedelta
+from pathlib import Path
 import re
 import time
 from typing import Any, Optional, Tuple
@@ -23,9 +24,11 @@ class BookingManager:
     LOGIN_TIME = "07:55:00"
     BOOKING_TIME = "07:59:58"
     BOOKING_DEADLINE_TIME = "08:06:00"
+    STEP2_EARLIEST_TIME = "08:00:06"
     WAIT_END_TIME = "18:00:00"
     ACCESS_GYM_MAX_RETRIES = 30
     GUIDE_TOKEN_MAX_RETRIES = 20
+    TOKEN_RELOGIN_RETRIES = 3
     FIND_SLOT_MAX_RETRIES = 25
     STEP2_MAX_RETRIES = 5
     STEP3_MAX_RETRIES = 5
@@ -59,9 +62,10 @@ class BookingManager:
         执行预约主流程
         """
         try:
-            self._wait_for_login_time()
+            # self._wait_for_login_time()
             self._login()
-
+            print("登录成功")
+            
             self._init_booking_dates()
 
             token = self._get_token()   # 在预约开始前获取初始 token，失败则直接放弃预约流程
@@ -87,11 +91,16 @@ class BookingManager:
         if token:
             return token
 
+        token = self._retry_get_token_after_relogin()
+        if token:
+            return token
+
         logging.error("BOOKING_TIME 前未能从预约须知页提取 token，终止预约流程")
         return None
 
     def _run_booking_loop(self, token: str) -> Optional[str]:
         booking_deadline = self._booking_deadline()
+        step2_earliest = self._step2_earliest_time()
         gym_page_response = None
         # current_token = token
 
@@ -113,6 +122,17 @@ class BookingManager:
                 continue
 
             logging.info(f"成功找到可用场地: {available_site}")
+            if not self.debug and datetime.now() < step2_earliest:
+                remaining = max((step2_earliest - datetime.now()).total_seconds(), 0.0)
+                sleep_time = random.uniform(0.4, 0.8) if remaining > 1.0 else random.uniform(0.05, 0.15)
+                # 不到门禁时间不提交 Step2，降低过早高频提交导致封禁的风险。
+                logging.info(
+                    f"命中可用场地，但未到 {self.STEP2_EARLIEST_TIME}，延后 Step2 提交 "
+                    f"(剩余 {remaining:.2f}s)"
+                )
+                time.sleep(min(sleep_time, remaining) if remaining > 0 else 0.01)
+                continue
+
             captcha_token, reserve_id, order_id = self._process_step2(
                 available_site=available_site,
                 token=token
@@ -142,6 +162,15 @@ class BookingManager:
             hour=deadline_time.hour,
             minute=deadline_time.minute,
             second=deadline_time.second,
+            microsecond=0,
+        )
+
+    def _step2_earliest_time(self) -> datetime:
+        earliest_time = datetime.strptime(self.STEP2_EARLIEST_TIME, "%H:%M:%S").time()
+        return datetime.now().replace(
+            hour=earliest_time.hour,
+            minute=earliest_time.minute,
+            second=earliest_time.second,
             microsecond=0,
         )
 
@@ -260,10 +289,6 @@ class BookingManager:
         booking_time = datetime.strptime(self.BOOKING_TIME, "%H:%M:%S").time()
 
         for attempt in range(self.GUIDE_TOKEN_MAX_RETRIES):
-            # 过了 BOOKING_TIME 再来这里拿初始 token 已经没有意义，直接交给主流程。
-            if datetime.now().time() >= booking_time:
-                break
-
             response = self.appointment.get(
                 self.BOOKING_GUIDE_URL,
                 referer=self.BOOKING_GUIDE_URL
@@ -274,6 +299,7 @@ class BookingManager:
                     logging.info(f"成功从预约须知页提取 token (尝试 {attempt + 1} 次)")
                     return token
 
+                self._dump_token_response(response, prefix="respone")
                 logging.warning(
                     f"预约须知页访问成功但未提取到 token，继续重试... "
                     f"(第 {attempt + 1} 次尝试)"
@@ -289,6 +315,41 @@ class BookingManager:
             time.sleep(sleep_time)
 
         return None
+
+    def _retry_get_token_after_relogin(self) -> Optional[str]:
+        for attempt in range(self.TOKEN_RELOGIN_RETRIES):
+            logging.warning(
+                f"获取 token 失败，开始重新登录并访问场馆页重试... "
+                f"(第 {attempt + 1}/{self.TOKEN_RELOGIN_RETRIES} 次)"
+            )
+            self._login()
+            response = self._access_gym_page()
+            if not response:
+                continue
+
+            token = self._extract_token(response.text)
+            if token:
+                logging.info(f"重新登录后成功从场馆页提取 token (第 {attempt + 1} 次)")
+                return token
+
+            self._dump_token_response(response, prefix="respone")
+
+        return None
+
+    @staticmethod
+    def _dump_token_response(response, prefix: str = "respone") -> Optional[str]:
+        if response is None:
+            return None
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        dump_path = Path(f"{prefix}_{timestamp}.html")
+        try:
+            dump_path.write_text(response.text or "", encoding="utf-8")
+            logging.warning(f"token提取失败，已输出响应内容到: {dump_path}")
+            return str(dump_path)
+        except OSError as exc:
+            logging.error(f"写入token失败响应文件时出错: {exc}")
+            return None
 
     def _access_gym_page(self) -> Optional[Any]:
         url = self.GYM_PAGE_URL.format(gym_id=self.gym_id)
