@@ -5,9 +5,10 @@ import logging
 
 def main():
     logging.basicConfig(level=logging.DEBUG)
-    app_config = AppConfig.load_from_file("config1.json")
+    config_file = "config.json"
+    app_config = AppConfig.load_from_file(config_file)
     app = Appointment(app_config.username, app_config.password)
-    email_sender = EmailSender("config1.json")
+    email_sender = EmailSender(config_file)
     try:
         app.login()
         logging.info("登录成功")
