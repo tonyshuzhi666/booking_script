@@ -11,7 +11,6 @@ class CaptchaHandler:
         self.secret_key = ''
         self.click_data = []
         self.token = ''
-        self.click_data = []
 
     def process_captcha(self, response_data: Dict) -> Tuple[str, str]:
         """处理验证码识别流程"""

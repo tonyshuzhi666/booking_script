@@ -11,14 +11,16 @@ class Appointment:
         self.username = username
         self.password = password
         self.session = requests.Session()
-        self.session.timeout = 10 
         self.user_agent = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                    'AppleWebKit/537.36 (KHTML, like Gecko) '
                    'Chrome/128.0.0.0 Safari/537.36')
-        self.header ={
+        self.base_headers = {
             'User-Agent': self.user_agent,
             'Host': 'pecg.hust.edu.cn',
         }
+        # 通过自定义 TransportAdapter 设置全局默认超时
+        self.session.mount('https://', requests.adapters.HTTPAdapter())
+        self.session.mount('http://', requests.adapters.HTTPAdapter())
 
     def login(self):
         with HustPass(self.username, self.password) as s:
@@ -44,33 +46,35 @@ class Appointment:
         else:
             logging.error(f"请求失败{url}，状态码：{status_code}")
 
-    def get(self, url, referer=None, x_requested_with=None, content_type=None, origin=None, proxies=None):
-        if referer: self.header['Referer'] = referer
-        if x_requested_with: self.header['x-requested-with'] = x_requested_with
-        if content_type: self.header['Content-Type'] = content_type
-        if origin: self.header['Origin'] = origin
-        if proxies: self.header['Proxy-Connection']: proxies
+    def get(self, url, referer=None, x_requested_with=None, content_type=None, origin=None, proxy_connection=None):
+        headers = self.base_headers.copy()
+        if referer: headers['Referer'] = referer
+        if x_requested_with: headers['x-requested-with'] = x_requested_with
+        if content_type: headers['Content-Type'] = content_type
+        if origin: headers['Origin'] = origin
+        if proxy_connection: headers['Proxy-Connection'] = proxy_connection
         
         try:
-            response = self.session.get(url, headers=self.header)
+            response = self.session.get(url, headers=headers, timeout=10)
             self._log_response_status(response, url)
-            return response # 关键修改：总是返回响应对象
+            return response
         except requests.exceptions.RequestException as e:
             logging.error(f"GET请求网络异常: {url}, 错误: {e}")
         
         return None
 
-    def post(self, url, data, referer=None, x_requested_with=None, content_type=None, origin=None, proxies=None, allow_redirects=True):
-        if referer: self.header['Referer'] = referer
-        if x_requested_with: self.header['x-requested-with'] = x_requested_with
-        if content_type: self.header['Content-Type'] = content_type
-        if origin: self.header['Origin'] = origin
-        if proxies: self.header['Proxy-Connection']: proxies
+    def post(self, url, data, referer=None, x_requested_with=None, content_type=None, origin=None, proxy_connection=None, allow_redirects=True):
+        headers = self.base_headers.copy()
+        if referer: headers['Referer'] = referer
+        if x_requested_with: headers['x-requested-with'] = x_requested_with
+        if content_type: headers['Content-Type'] = content_type
+        if origin: headers['Origin'] = origin
+        if proxy_connection: headers['Proxy-Connection'] = proxy_connection
 
         try:
-            response = self.session.post(url, headers=self.header, data=data, allow_redirects=allow_redirects)
+            response = self.session.post(url, headers=headers, data=data, allow_redirects=allow_redirects, timeout=10)
             self._log_response_status(response, url)
-            return response # 关键修改：总是返回响应对象
+            return response
         except requests.exceptions.RequestException as e:
             logging.error(f"POST请求网络异常: {url}, 错误: {e}")
 

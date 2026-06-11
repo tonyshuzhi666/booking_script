@@ -596,7 +596,7 @@ class BookingManager:
                 url=self.CAPTCHA_GET_URL,
                 referer="https://pecg.hust.edu.cn/cggl/front/step2",
                 content_type="application/json;charset=UTF-8",
-                proxies="keep-alive",
+                proxy_connection="keep-alive",
                 origin="https://pecg.hust.edu.cn",
                 data=json_data
             )
@@ -633,7 +633,7 @@ class BookingManager:
                 origin='https://pecg.hust.edu.cn',
                 content_type='application/json;charset=UTF-8',
                 referer='https://pecg.hust.edu.cn/cggl/front/step2',
-                proxies='keep-alive'
+                proxy_connection='keep-alive'
             )
             if not self._is_response_ok(response_check):
                 logging.error(
@@ -680,7 +680,7 @@ class BookingManager:
             status = cells[3].get_text(strip=True)
 
             # 预约成功，返回预约结果
-            if status == "已缴费" and time_info == f"{self.book_day}{self.start_time}—{self.end_time}":
+            if status == "已缴费" and time_info == f"{self.book_day} {self.start_time}—{self.end_time}":
                 booking_result = f"场地信息: {field_info}, 时间: {time_info}, 状态: {status}"
                 return booking_result
         
